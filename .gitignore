@@ -31,3 +31,13 @@ dist/
 build/
 *.exe
 *.out
+
+# 개인정보 (수신자 목록) / 배포용 빌드 폴더
+*.xlsx
+send-email/배포용/
+
+# 실제 발송용 문자/메일 내용 (예시 파일만 공개)
+send-sms/message_*.txt
+!send-sms/message_example.txt
+send-email/*.html
+!send-email/email_example.html
