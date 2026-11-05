@@ -41,3 +41,6 @@ send-sms/message_*.txt
 !send-sms/message_example.txt
 send-email/*.html
 !send-email/email_example.html
+
+# 웹캠 외부 접속 주소
+webcam-stream/tunnel_url.txt

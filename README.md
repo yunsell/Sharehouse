@@ -9,6 +9,7 @@
 | [send-email](./send-email) | 엑셀 수신자 목록으로 HTML 이메일 대량 발송 | Python |
 | [send-sms](./send-sms) | 엑셀 수신자 목록으로 알리고 문자 대량 발송 | Python |
 | [aliigo_python_example](./aliigo_python_example) | 알리고 문자 API 샘플 (발송, 조회, 취소 등) | Python |
+| [webcam-stream](./webcam-stream) | 내 컴퓨터의 웹캠을 비밀번호로 보호된 웹페이지에서 실시간 시청 | Python |
 
 ## 사용 방법
 
