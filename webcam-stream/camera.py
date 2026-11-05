@@ -104,7 +104,7 @@ class Camera:
                         capture.release()
                         capture = None
                         self._set_open(False)
-                        print("[카메라] 꺼짐", flush=True)
+                        print(f"[카메라 {self.index}] 꺼짐", flush=True)
                     self._wake.clear()
                     # clear와 대기 사이에 들어온 시청자를 놓치지 않도록 다시 확인합니다.
                     if not self._should_run():
@@ -125,11 +125,11 @@ class Camera:
                         continue
                     self._set_open(True)
                     error_reported = False
-                    print("[카메라] 켜짐", flush=True)
+                    print(f"[카메라 {self.index}] 켜짐", flush=True)
 
                 ok, frame = capture.read()
                 if not ok:
-                    print("[오류] 카메라에서 영상을 읽지 못했습니다. 다시 연결합니다.", flush=True)
+                    print(f"[오류] 카메라 {self.index}번에서 영상을 읽지 못했습니다. 다시 연결합니다.", flush=True)
                     capture.release()
                     capture = None
                     self._set_open(False)

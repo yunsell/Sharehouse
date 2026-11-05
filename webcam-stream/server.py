@@ -28,9 +28,13 @@ header { display: flex; justify-content: space-between; align-items: center;
          padding: 10px 16px; gap: 12px; }
 header h1 { font-size: 16px; font-weight: 600; margin: 0; }
 header form { margin: 0; }
-main { padding: 0 16px 16px; }
-main img { display: block; width: 100%; max-width: 960px; margin: 0 auto; background: #000; }
-#status { text-align: center; color: #aaa; min-height: 1.5em; }
+main { display: grid; gap: 16px; max-width: 960px; margin: 0 auto; padding: 0 16px 16px;
+       grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+main.multi { max-width: 1600px; }
+figure { margin: 0; min-width: 0; }
+figcaption { padding-bottom: 6px; color: #aaa; font-size: 14px; }
+figure img { display: block; width: 100%; background: #000; }
+.status { text-align: center; color: #aaa; min-height: 1.5em; margin: 8px 0 0; }
 """
 
 LOGIN_PAGE = """<!doctype html>
@@ -50,23 +54,82 @@ VIEWER_PAGE = """<!doctype html>
 <body>
 <header><h1>웹캠</h1>
 <form method="post" action="/logout"><button type="submit">로그아웃</button></form></header>
-<main><img id="video" alt="웹캠 영상" src="/stream"><p id="status"></p></main>
+<main class="{main_class}">{feeds}</main>
 <script>
-const video = document.getElementById("video");
-const statusText = document.getElementById("status");
-video.addEventListener("load", () => {{ statusText.textContent = ""; }});
-video.addEventListener("error", async () => {{
-  statusText.textContent = "영상 연결이 끊겼습니다. 다시 연결하는 중입니다.";
-  try {{
-    const response = await fetch("/api/status");
-    if (response.status === 401) {{ location.href = "/login"; return; }}
-  }} catch (e) {{}}
-  setTimeout(() => {{ video.src = "/stream?t=" + Date.now(); }}, 3000);
-}});
+// 브라우저는 img 태그의 MJPEG가 끊겨도 오류를 알려주지 않으므로, 스트림을 직접 읽어 끊김을 감지합니다.
+const FRAME_TIMEOUT_MS = 12000;
+const RETRY_MS = 3000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function findMarker(bytes, second, from) {{
+  for (let i = from; i < bytes.length - 1; i++) {{
+    if (bytes[i] === 0xff && bytes[i + 1] === second) return i;
+  }}
+  return -1;
+}}
+
+function showFrame(video, frame) {{
+  const previous = video.src;
+  video.src = URL.createObjectURL(new Blob([frame], {{ type: "image/jpeg" }}));
+  if (previous) URL.revokeObjectURL(previous);
+}}
+
+async function readStream(feed, signal, onFrame) {{
+  const response = await fetch(feed, {{ signal }});
+  if (response.status === 401) {{ location.href = "/login"; return; }}
+  if (!response.ok) return;
+  const reader = response.body.getReader();
+  let buffer = new Uint8Array(0);
+  while (true) {{
+    const {{ done, value }} = await reader.read();
+    if (done) return;
+    const merged = new Uint8Array(buffer.length + value.length);
+    merged.set(buffer);
+    merged.set(value, buffer.length);
+    buffer = merged;
+    while (true) {{
+      const start = findMarker(buffer, 0xd8, 0);
+      const end = start < 0 ? -1 : findMarker(buffer, 0xd9, start + 2);
+      if (end < 0) break;
+      onFrame(buffer.slice(start, end + 2));
+      buffer = buffer.slice(end + 2);
+    }}
+  }}
+}}
+
+async function play(figure) {{
+  const video = figure.querySelector("img");
+  const statusText = figure.querySelector(".status");
+  while (true) {{
+    const controller = new AbortController();
+    let watchdog;
+    const resetWatchdog = () => {{
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => controller.abort(), FRAME_TIMEOUT_MS);
+    }};
+    resetWatchdog();
+    try {{
+      await readStream(video.dataset.stream, controller.signal, (frame) => {{
+        resetWatchdog();
+        statusText.textContent = "";
+        showFrame(video, frame);
+      }});
+    }} catch (e) {{}}
+    clearTimeout(watchdog);
+    controller.abort();
+    statusText.textContent = "영상을 불러오지 못했습니다. 다시 연결하는 중입니다.";
+    await sleep(RETRY_MS);
+  }}
+}}
+
+document.querySelectorAll("figure").forEach(play);
 </script></body></html>"""
 
+FEED_TEMPLATE = """<figure>{caption}<img alt="{label} 영상" data-stream="/stream/{position}">
+<p class="status"></p></figure>"""
 
-def create_app(camera, password, max_viewers=3, session_hours=12):
+
+def create_app(cameras, password, max_viewers=3, session_hours=12):
     """로그인과 MJPEG 스트리밍을 제공하는 FastAPI 앱을 만듭니다."""
     sessions = {}  # 토큰 -> 만료 시각. 서버를 재시작하면 모두 로그아웃됩니다.
     login_failures = []
@@ -75,9 +138,11 @@ def create_app(camera, password, max_viewers=3, session_hours=12):
 
     @asynccontextmanager
     async def lifespan(app):
-        camera.start()
+        for camera in cameras:
+            camera.start()
         yield
-        camera.stop()
+        for camera in cameras:
+            camera.stop()
 
     # 자동 생성 API 문서는 외부에 공개하지 않습니다.
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
@@ -121,11 +186,24 @@ def create_app(camera, password, max_viewers=3, session_hours=12):
         html = LOGIN_PAGE.format(style=PAGE_STYLE, error=error_html)
         return HTMLResponse(html, status_code=status_code)
 
+    def viewer_page():
+        # 카메라가 1대면 이름표 없이 화면 하나만 보여줍니다.
+        feeds = []
+        for position in range(len(cameras)):
+            label = f"카메라 {position + 1}"
+            caption = f"<figcaption>{label}</figcaption>" if len(cameras) > 1 else ""
+            feeds.append(FEED_TEMPLATE.format(caption=caption, label=label, position=position))
+        return VIEWER_PAGE.format(
+            style=PAGE_STYLE,
+            main_class="multi" if len(cameras) > 1 else "",
+            feeds="".join(feeds),
+        )
+
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
         if not is_logged_in(request):
             return RedirectResponse("/login", status_code=303)
-        return HTMLResponse(VIEWER_PAGE.format(style=PAGE_STYLE))
+        return HTMLResponse(viewer_page())
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_form(request: Request):
@@ -180,11 +258,15 @@ def create_app(camera, password, max_viewers=3, session_hours=12):
     async def status(request: Request):
         if not is_logged_in(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
-        return {"viewers": camera.viewers, "camera_on": camera.is_open}
+        return {
+            "cameras": [
+                {"viewers": camera.viewers, "camera_on": camera.is_open} for camera in cameras
+            ]
+        }
 
-    async def frames(token, ip):
+    async def frames(camera, token, ip):
         count = camera.add_viewer()
-        print(f"[시청] 시작 ({ip}), 현재 {count}명", flush=True)
+        print(f"[시청] 카메라 {camera.index} 시작 ({ip}), 현재 {count}명", flush=True)
         last_seq = -1
         last_frame_at = time.monotonic()
         try:
@@ -199,20 +281,23 @@ def create_app(camera, password, max_viewers=3, session_hours=12):
                         f"Content-Length: {len(jpeg)}\r\n\r\n"
                     ).encode("ascii") + jpeg + b"\r\n"
                 elif time.monotonic() - last_frame_at > STALL_TIMEOUT_SECONDS:
-                    print("[시청] 새 프레임이 없어 연결을 끊습니다.", flush=True)
+                    print(f"[시청] 카메라 {camera.index}의 새 프레임이 없어 연결을 끊습니다.", flush=True)
                     break
                 await asyncio.sleep(camera.frame_interval / 2)
         finally:
-            print(f"[시청] 종료 ({ip}), 현재 {camera.remove_viewer()}명", flush=True)
+            print(f"[시청] 카메라 {camera.index} 종료 ({ip}), 현재 {camera.remove_viewer()}명", flush=True)
 
-    @app.get("/stream")
-    async def stream(request: Request):
+    @app.get("/stream/{position}")
+    async def stream(request: Request, position: int):
         if not is_logged_in(request):
             return JSONResponse({"error": "unauthorized"}, status_code=401)
+        if not 0 <= position < len(cameras):
+            return JSONResponse({"error": "camera not found"}, status_code=404)
+        camera = cameras[position]
         if camera.viewers >= max_viewers:
             return JSONResponse({"error": "too many viewers"}, status_code=503)
         return StreamingResponse(
-            frames(request.cookies[COOKIE_NAME], client_ip(request)),
+            frames(camera, request.cookies[COOKIE_NAME], client_ip(request)),
             media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
             headers={"X-Accel-Buffering": "no"},
         )
